@@ -3,14 +3,18 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"clearledger/indexer/soroban"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -75,6 +79,15 @@ func (h *APIHandler) HandleCreateInvoice(w http.ResponseWriter, r *http.Request)
 	hash, status, err := h.submitAndConfirm(r.Context(), signedTx)
 	if err != nil {
 		writeHTTPError(w, r, err)
+		return
+	}
+	if status == "PENDING" {
+		writeJSON(w, http.StatusAccepted, map[string]string{
+			"invoice_id":       invoiceID,
+			"transaction_hash": hash,
+			"status":           "PENDING",
+			"status_url":       "/transactions/" + hash,
+		})
 		return
 	}
 
@@ -323,7 +336,7 @@ func (h *APIHandler) submitAndConfirm(ctx context.Context, signedTx string) (has
 		Status string `json:"status"`
 		Error  string `json:"error"`
 	}
-	if err := soroban.CallSorobanRPC(ctx, h.cfg.SorobanRPCURL, "sendTransaction", map[string]string{"transaction": signedTx}, &submitResp); err != nil {
+	if err := h.callSorobanRPC(ctx, "sendTransaction", map[string]string{"transaction": signedTx}, &submitResp); err != nil {
 		// err may embed the full RPC URL (and any API key in it); log it and
 		// return a client-safe message instead of interpolating it (issue #921).
 		slog.ErrorContext(ctx, "failed to send transaction", "error", err)
@@ -333,13 +346,59 @@ func (h *APIHandler) submitAndConfirm(ctx context.Context, signedTx string) (has
 	if submitResp.Status == "ERROR" {
 		return "", "", httpErrorf(http.StatusInternalServerError, "transaction submission rejected: %s", submitResp.Error)
 	}
+	if submitResp.Hash == "" {
+		return "", "", httpErrorf(http.StatusBadGateway, "transaction submission returned no hash")
+	}
 
 	finalStatus, err := h.awaitTransaction(ctx, submitResp.Hash)
 	if err != nil {
+		var pending *transactionPendingError
+		if errors.As(err, &pending) {
+			return submitResp.Hash, "PENDING", nil
+		}
 		return "", "", err
 	}
 
 	return submitResp.Hash, finalStatus, nil
+}
+
+type transactionPendingError struct{}
+
+func (*transactionPendingError) Error() string { return "transaction confirmation is pending" }
+
+func (h *APIHandler) callSorobanRPC(ctx context.Context, method string, params, result interface{}) error {
+	if h.callSorobanRPCFn != nil {
+		return h.callSorobanRPCFn(ctx, h.cfg.SorobanRPCURL, method, params, result)
+	}
+	return soroban.CallSorobanRPC(ctx, h.cfg.SorobanRPCURL, method, params, result)
+}
+
+// HandleGetTransactionStatus serves GET /transactions/{hash}. It is a
+// read-only recovery path for invoice creation requests that returned while
+// Soroban was still confirming their transaction.
+func (h *APIHandler) HandleGetTransactionStatus(w http.ResponseWriter, r *http.Request) {
+	hash := strings.TrimSpace(chi.URLParam(r, "hash"))
+	decoded, err := hex.DecodeString(hash)
+	if err != nil || len(decoded) != 32 {
+		writeHTTPError(w, r, httpErrorf(http.StatusBadRequest, "invalid transaction hash"))
+		return
+	}
+
+	var result struct {
+		Hash   string `json:"hash"`
+		Status string `json:"status"`
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := h.callSorobanRPC(ctx, "getTransaction", map[string]string{"hash": hash}, &result); err != nil {
+		internalError(w, r, "failed to retrieve transaction status", err)
+		return
+	}
+	status := strings.ToUpper(result.Status)
+	if status != "SUCCESS" && status != "FAILED" {
+		status = "PENDING"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"transaction_hash": hash, "status": status})
 }
 
 // awaitTransaction polls getTransaction for hash until it succeeds, fails, or
@@ -355,7 +414,10 @@ func (h *APIHandler) awaitTransaction(ctx context.Context, hash string) (string,
 	pollAttempts := 0
 
 	for {
-		if err := soroban.CallSorobanRPC(ctx, h.cfg.SorobanRPCURL, "getTransaction", map[string]string{"hash": hash}, &txResult); err != nil {
+		if err := h.callSorobanRPC(ctx, "getTransaction", map[string]string{"hash": hash}, &txResult); err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
+				return "", &transactionPendingError{}
+			}
 			// err may embed the full RPC URL (and any API key in it); log it and
 			// return a client-safe message instead of interpolating it (issue #921).
 			slog.ErrorContext(ctx, "failed to poll transaction", "error", err)
@@ -375,12 +437,12 @@ func (h *APIHandler) awaitTransaction(ctx context.Context, hash string) (string,
 
 		pollAttempts++
 		if pollAttempts >= maxPollAttempts {
-			return "", httpErrorf(http.StatusGatewayTimeout, "transaction confirmation timed out after %d attempts: %s", maxPollAttempts, hash)
+			return "", &transactionPendingError{}
 		}
 
 		select {
 		case <-ctx.Done():
-			return "", httpErrorf(http.StatusGatewayTimeout, "request cancelled: %s", ctx.Err().Error())
+			return "", &transactionPendingError{}
 		case <-time.After(createInvoicePollDelay):
 		}
 	}

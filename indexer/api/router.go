@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
+	indexermiddleware "clearledger/indexer/middleware"
 	"github.com/getsentry/sentry-go"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/golang-jwt/jwt/v5"
-	indexermiddleware "clearledger/indexer/middleware"
 )
 
 func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
@@ -414,6 +414,7 @@ func NewRouter(h *APIHandler) (*chi.Mux, func()) {
 		r.Use(RateLimitMiddleware(rl))
 		r.Get("/stats", h.HandleGetStats)
 		r.Get("/events", h.HandleGetEvents)
+		r.Get("/transactions/{hash}", h.HandleGetTransactionStatus)
 		r.Get("/invoices/{id}", h.HandleGetInvoiceByID)
 		r.Get("/invoices", h.HandleGetInvoices)
 		r.Get("/pool/stats", h.HandleGetPoolStats)

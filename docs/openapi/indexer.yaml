@@ -201,6 +201,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CreateInvoiceResponse"
+        "202":
+          description: Invoice submitted; confirmation is still pending. Poll the returned status URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateInvoicePendingResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -229,6 +235,30 @@ paths:
                 $ref: "#/components/schemas/Invoice"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /transactions/{hash}:
+    get:
+      tags: [Invoices]
+      summary: Get submitted transaction status
+      security: []
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[a-fA-F0-9]{64}$"
+      responses:
+        "200":
+          description: Current confirmation status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /stats:
     get:
@@ -484,6 +514,32 @@ components:
           type: string
           description: Transaction status (e.g. SUCCESS).
       required: [invoice_id, transaction_hash, status]
+
+    CreateInvoicePendingResponse:
+      type: object
+      properties:
+        invoice_id:
+          type: string
+        transaction_hash:
+          type: string
+          pattern: "^[a-fA-F0-9]{64}$"
+        status:
+          type: string
+          enum: [PENDING]
+        status_url:
+          type: string
+      required: [invoice_id, transaction_hash, status, status_url]
+
+    TransactionStatus:
+      type: object
+      properties:
+        transaction_hash:
+          type: string
+          pattern: "^[a-fA-F0-9]{64}$"
+        status:
+          type: string
+          enum: [PENDING, SUCCESS, FAILED]
+      required: [transaction_hash, status]
 
     Invoice:
       type: object

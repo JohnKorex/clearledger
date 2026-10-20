@@ -21,13 +21,14 @@ import (
 )
 
 type APIHandler struct {
-	cfg             *config.Config
-	serverKP        *keypair.Full
-	statsMu         sync.RWMutex
-	statsData       *db.ProtocolStats
-	statsCached     time.Time
-	listenerHealth  *ListenerHealth
-	dbHealthChecker func(context.Context) error
+	cfg              *config.Config
+	serverKP         *keypair.Full
+	statsMu          sync.RWMutex
+	statsData        *db.ProtocolStats
+	statsCached      time.Time
+	listenerHealth   *ListenerHealth
+	dbHealthChecker  func(context.Context) error
+	callSorobanRPCFn func(context.Context, string, string, interface{}, interface{}) error
 
 	// dependency-injectable storage and contract readers. Defaults are wired
 	// in NewAPIHandler so production behavior is unchanged; tests in this
@@ -47,10 +48,11 @@ func NewAPIHandler(cfg *config.Config) (*APIHandler, error) {
 		return nil, fmt.Errorf("invalid server seed: %w", err)
 	}
 	return &APIHandler{
-		cfg:             cfg,
-		serverKP:        kp,
-		listenerHealth:  NewListenerHealth(),
-		dbHealthChecker: defaultDBHealthChecker,
+		cfg:              cfg,
+		serverKP:         kp,
+		listenerHealth:   NewListenerHealth(),
+		dbHealthChecker:  defaultDBHealthChecker,
+		callSorobanRPCFn: soroban.CallSorobanRPC,
 		getInvoiceByIDFn: func(ctx context.Context, id string) (*db.DbInvoice, error) {
 			return db.GetInvoiceByID(ctx, db.Pool, id)
 		},
